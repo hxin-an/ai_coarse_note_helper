@@ -1,0 +1,25 @@
+# 課程原始教材（版權）
+**/教材/
+
+# 錄音檔（檔案太大）
+**/錄音/
+
+# 可重新產生的檔案
+**/投影片/
+**/逐字稿/
+
+# Claude Code 本地設定
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Conda / 環境
+.env
+*.egg-info/
+
+# 系統
+.DS_Store
+Thumbs.db
