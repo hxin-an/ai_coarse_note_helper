@@ -264,9 +264,16 @@ OS execution time :  介於 memory 和 storage 之間
 
 為了減少磁頭移動的距離（即降低 Seek Time），作業系統會對 I/O 請求進行排程：
 
-- **FCFS (First Come First Serve)**：按請求順序服務，效能最差 。
-- **SSTF (Shortest Seek Time First)**：優先選擇距離當前磁頭位置最近的請求，但可能導致遠端請求發生 **Starvation**。
-- **SCAN (Elevator Algorithm)**：磁頭像電梯一樣向一端移動並服務途中所有請求，到頭後再反向移動，確保每個請求在每輪都能被服務 。
+以下用同一組請求示範（磁頭起始位置：Track 53；請求順序：98, 183, 40, 122, 14, 124, 65, 67）：
+
+- **FCFS (First Come First Serve)**：按請求順序服務，磁頭移動距離最長，效能最差。
+  - 順序：53→98→183→40→122→14→124→65→67，**總移動量：634 Tracks**
+- **SSTF (Shortest Seek Time First)**：優先選擇距離當前磁頭最近的請求，大幅降低移動量。
+  - **總移動量：226 Tracks**
+  - 缺點：遠端請求可能發生 **Starvation**（例：Track 183 可能長期等不到服務）
+- **SCAN (Elevator Algorithm)**：磁頭像電梯向一端掃到底，再反向，確保每個請求每輪都被服務。
+  - **總移動量：53+183 = 236 Tracks**
+  - 優點：沒有 Starvation，每輪必定服務所有請求
 
 ## RAID 技術 (Redundant Array of Inexpensive Disks)
 
@@ -281,9 +288,28 @@ OS execution time :  介於 memory 和 storage 之間
 - **RAID 0 (Striping)**：資料分佈在多顆磁碟，僅追求**效能**與容量，無容錯能力 。
 - **RAID 1 (Mirror)**：全量備份資料，追求最高**可靠性**
 - **RAID 0 + 1** : 先做 RAID 1 在做 RAID 0 已達到 reliable + performance
-- **RAID 5**：至少需 3 顆磁碟，透過**奇偶校驗 (Parity)** 提供容錯，損壞一顆磁碟時可重建資料 。
+- **RAID 5**：至少需 3 顆磁碟，透過**奇偶校驗 (Parity)** 提供容錯，損壞一顆磁碟時可重建資料。
+  - Parity 計算方式：對同一 stripe 的所有資料做 XOR：
+    | A | B | C | Parity (A⊕B⊕C) |
+    |---|---|---|----------------|
+    | 0 | 0 | 0 | ★ (=0) |
+    | 0 | 0 | ★ | 1 |
+    | 1 | 0 | 1 | ★ (=0) |
+    | ★ | 0 | 1 | 1 |
+  - → 任何一顆磁碟（含 Parity 碟）損壞，皆可透過其他磁碟 XOR 重建
 - **RAID 50**：RAID 5 + RAID 0 的組合，能保護更多顆磁碟
 - **RAID 5 的限制**：無論磁碟數量多少，一次只能重建 1 顆磁碟的資料
+
+**RAID 各等級比較：**
+
+| | JBOD | RAID 0 | RAID 1 | RAID 5 |
+|---|---|---|---|---|
+| **最少磁碟數** | 1 | 2 | 2 | 3 |
+| **容錯能力** | 0 | 0 | N:1（鏡像） | 1 |
+| **容量** | N | N | 1 | N-1 |
+| **讀取效能** | 1 | N | N | N |
+| **寫入效能** | 1 | N | 1 | 1 |
+| **用途** | 只是增大空間 | 高效能 | 高可靠 | 兼顧成本與可靠 |
 
 ---
 
@@ -320,6 +346,13 @@ $$\text{Channel} \to \text{Chip} \to \text{Die} \to \text{Plane} \to \text{Block
 - **同一條 Wordline 上的所有 cell** 屬於同一個 Flash Page
 - SSD 內部有 **Controller**（微型 CPU）和 **DRAM**（作為 Translation Table 的快取）
 - **Page 大小（製程決定）**：Page 大小（4KB、16KB、32KB 等）**在製造時設定，出廠後無法更改**；與 OS 的 Page Size 完全無關
+
+**NAND Flash Block 內部結構（Slide 18 圖）：**
+- **Bitline**：垂直走線，連接 n-drain，決定要讀/寫哪一串 cell
+- **Wordline**：水平走線，連接 Control Gate，決定目標 Page
+- **String Select Line (SSL)**：控制 cell string 與 bitline 的連接
+- **Ground Select Line (GSL)**：控制 cell string 與 source line（接地）的連接
+- → Page = 同一條 Wordline 上所有 cell；Block = 所有 Wordline 共享同一 P-substrate
 
 ---
 
@@ -396,13 +429,14 @@ $$\text{Channel} \to \text{Chip} \to \text{Die} \to \text{Plane} \to \text{Block
 
 ### MLC 的 Programming 挑戰
 
-**Program and Verify（P&V）機制：**
-1. 施加 Program 電壓，注入電子
+**Program and Verify（P&V）機制 — Incremental Step Pulse Programming (ISPP)：**
+1. 施加初始 Program 電壓，注入少量電子
 2. 立即 Read（Verify）檢查 Vth 是否達到目標
-3. 若未達到 → 繼續注入；若超過 → 無法撤回（只能 erase 整個 block）
+3. 若未達到 → 電壓階梯式遞增（Step）再注入；若超過 → 無法撤回（只能 erase 整個 block）
 4. 重複直到所有 cell 到達目標電壓範圍
 
-→ MLC 需要多次 P&V 迭代，**寫入時間遠長於 SLC**
+→ ISPP 以小步驟逐漸逼近目標 Vth，避免過衝（overshoot）
+→ MLC 需要更多次 P&V 迭代才能區分 4 個電壓區間，**寫入時間遠長於 SLC**
 
 ---
 
@@ -475,7 +509,16 @@ Host → Device Driver → FTL (Address Translator + Wear Leveler + GC) → MTD 
 
 **Block-Level Address Translation：**
 - 以 block 為單位映射（較粗粒度）
+- 範例：VBA=28，每 block 6 pages → Block=28÷6=4，Page=28%6=4 → 對應 PBA Block 4 的第 4 page
 - **問題：block 利用率低；write overhead 高**（一個 page 更新就要搬整個 block）
+- FTL vs Block-Level 比較：
+
+| 指標 | Page-Level FTL | Block-Level |
+|------|---------------|-------------|
+| DRAM 用量 | **1.9 GB** | 11 MB |
+| Read 延遲 | 0.1 μs | 0.1 μs |
+| Write 延遲 | 1 ms | **128 ms** |
+| GC Overhead | 低 | N/A |
 
 ### Garbage Collection（垃圾回收）
 
@@ -524,9 +567,10 @@ Host → Device Driver → FTL (Address Translator + Wear Leveler + GC) → MTD 
 - **代價**：額外的資料搬移 → 效能下降
 
 **SWL – Dual Pool Wear Leveling：**
-- 將 blocks 分為 hot pool 和 cold pool
-- 動態調整 pool 大小（Adaptive Pool Resizing）
-- 對 cold data 維護 access count（判斷 hot/cold），但不需追蹤精確時間
+- 將 blocks 分為 hot pool（持續老化）和 cold pool（停止老化）
+- 動態調整 pool 大小（Adaptive Pool Resizing）防止特定 block 被反覆選到
+- 對 cold data 維護 access count（判斷 hot/cold）
+  - 工程問題：計數器要幾 bits？若計數器到達上限（如 8-bit = 256）怎麼處理？
 
 **SWL – Progressive Wear Leveling (PWL)：**
 - **關鍵觀察**：SWL 的觸發時機很重要

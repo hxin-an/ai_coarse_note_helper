@@ -14,7 +14,7 @@
 
 | 教材檔案 | 筆記檔案 | 狀態 | 處理日期 | 備註 |
 |---------|---------|------|---------|------|
-| 教材/L1 Storage Devices_260309v1.pptx | 筆記/L1_Storage Devices.md | ✅ 完成 | 2026-03-21 | 有錄音 0309上課內容.mp4；涵蓋至本次上課進度（SSD FTL/GC/Wear Leveling） |
+| 教材/L1 Storage Devices_260309v1.pptx | 筆記/L1_Storage Devices.md | ✅ 完成 | 2026-03-21 | 有錄音 0309上課內容.mp4；以投影片圖片補充：磁碟排程數值範例、RAID XOR/比較表、NAND Block 結構、ISPP、Block-Level FTL 計算範例、Dual Pool 計數器問題 |
 
 ## 嵌入式即時系統
 
