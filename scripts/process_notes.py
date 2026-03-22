@@ -32,9 +32,10 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 # ── CUDA DLL fix for faster-whisper ────────────────────────────────────────────
 _cuda_dirs = [
-    r"C:\Users\hxin\anaconda3\envs\notes-ai\Library\bin",
-    r"C:\Users\hxin\anaconda3\envs\notes-ai\Lib\site-packages\nvidia\cublas\bin",
-    r"C:\Users\hxin\anaconda3\envs\notes-ai\Lib\site-packages\nvidia\cuda_runtime\bin",
+    r"C:\ProgramData\miniconda3\envs\notes-ai\Library\bin",
+    r"C:\ProgramData\miniconda3\envs\notes-ai\Lib\site-packages\nvidia\cublas\bin",
+    r"C:\ProgramData\miniconda3\envs\notes-ai\Lib\site-packages\nvidia\cudnn\bin",
+    r"C:\ProgramData\miniconda3\envs\notes-ai\Lib\site-packages\nvidia\cuda_runtime\bin",
 ]
 os.environ["PATH"] = ";".join(_cuda_dirs) + ";" + os.environ.get("PATH", "")
 for d in _cuda_dirs:

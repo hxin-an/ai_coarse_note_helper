@@ -1,117 +1,118 @@
-# Course Notes Assistant
+# Graduate Student Personal Assistant
 
-This workspace converts course materials (PPT/PDF) and lecture recordings into structured Markdown notes for Notion.
+This workspace is a personal assistant for a graduate student. It stores course notes, assignments, research, and progress reports — all in Markdown, synced to Notion.
+
+---
+
+## At Conversation Start
+
+1. **Read** `memory/user_profile.md` and `memory/skills_inventory.md` — load context before any task.
+2. **Check Google Calendar** (MCP: `google-workspace`) for events/deadlines in the next 7 days. If found, proactively mention them.
+3. **Check Gmail** (MCP: `google-workspace`) for unread emails from advisor. If any contain deadlines or tasks, add to Google Calendar and alert user.
+
+---
+
+## Active Courses (This Semester)
+
+- 嵌入式即時系統 — IC career prep
+- 演算法 — IC career prep
+- 作業系統 — IC career prep
+- 記憶體與儲存系統 — IC career prep
+
+---
+
+## Available Skills
+
+Invoke with `/skill-name` when the task matches:
+
+| Skill | When to Use |
+|-------|-------------|
+| `/note-lecture` | New course material (PPT/PDF) + optional recording |
+| `/note-resource` | YouTube / Bilibili video, web article, or saved PDF |
+| `/homework` | New assignment or project |
+| `/exam-prep` | Upcoming exam — generate Q&A and summaries |
+| `/progress-report` | Advisor meeting recording → summary → report |
+| `/paper-reading` | Academic paper → reading notes + PPT outline |
+| `/deep-research` | Gemini Deep Research report brought back → update CLAUDE.md |
+| `/suggest` | "What should I do now?" — recommend based on deadlines + skill gaps |
+
+---
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `memory/user_profile.md` | Background, research direction, career target |
+| `memory/skills_inventory.md` | Living skills matrix — always read before tasks |
+| `NOTES_STATUS.md` | Lecture notes + assignments + online resources progress |
+| `PROGRESS_STATUS.md` | Advisor meeting → report progress |
+| `PAPERS_STATUS.md` | Paper reading progress |
+| `NOTION_INDEX.md` | All pages pushed to Notion (local index) |
+| `scripts/process_notes.py` | PPT/PDF → PNG slides; audio → transcript (Whisper) |
+| `scripts/push_to_notion.py` | Push .md to Notion + update NOTION_INDEX.md |
+
+---
 
 ## Folder Structure
 
 ```
-c:\assistant\
-├── <course_name>\
-│   ├── 教材\        ← .pptx or .pdf (one note per file)
-│   ├── 錄音\        ← .mp3 / .mp4 (optional; matched by stem name)
-│   ├── 投影片\      ← per-slide PNG images (one subfolder per material stem)
-│   ├── 逐字稿\      ← .txt transcript output (kept for reference/comparison)
-│   └── 筆記\        ← output .md files
-├── scripts\
-│   └── process_notes.py
-└── CLAUDE.md
+課程/<course>/
+  教材/          ← .pptx / .pdf
+  錄音/          ← lecture audio
+  投影片/        ← exported PNGs
+  逐字稿/        ← Whisper transcripts
+  筆記/          ← lecture notes .md
+  作業/<hw>/     ← 題目/ 參考筆記/ 作答/
+  專題/<proj>/   ← 題目/ 參考筆記/ 草稿/
+  考試準備/<exam>/ ← 練習題/ 重點整理/
+進度報告/<YYYY-MM-DD_meeting>/
+  錄音/ 逐字稿/ 摘要/ 報告/
+論文/<paper_key>/
+  PDF/ 筆記/ 簡報大綱/
+網路資源/<LLM_AI|嵌入式|演算法|其他>/
+  <topic>/ ← 逐字稿/(影片用)/ 原文/(文章PDF)/ 筆記/
+深度研究/<topic>/
+  Gemini_報告_<date>.md
+  更新摘要_<date>.md
 ```
 
-## Courses
-
-- 嵌入式即時系統
-- 演算法
-- 作業系統
-- 記憶體與儲存系統
-
-## Notes Progress Tracking
-
-Before processing any material, check `c:\assistant\NOTES_STATUS.md` to see what has already been done.
-After completing a note, update `NOTES_STATUS.md` with the file name, status, date, and any relevant notes.
-
-## Workflow
-
-When the user says there is new material or a new recording:
-
-### Step 1 — Convert to images + transcript
-```bash
-# All materials in a course
-conda run -n notes-ai python c:/assistant/scripts/process_notes.py "c:/assistant/<course_name>"
-
-# Single material file
-conda run -n notes-ai python c:/assistant/scripts/process_notes.py "c:/assistant/<course_name>" "<filename.pptx>"
-```
-This exports slides to `投影片/<stem>/slide_001.png ...` and (if audio exists) saves transcript to `逐字稿/<stem>.txt`.
-
-### Step 2 — Generate notes
-Read each slide image in `投影片/<stem>/` (and the transcript if available), then write the structured note to `筆記/<stem>.md`. Do NOT rely on text extraction — use the images as the source of truth.
-
-## Rules
-
-- Always use the `notes-ai` conda environment. Never pip install into local Python.
-- Conda executable: `C:\Users\hxin\anaconda3\Scripts\conda.exe`
-- Audio transcription uses Whisper `medium` model on CUDA (GTX 1650, 4GB VRAM).
-- First run will download the Whisper model (~769MB) automatically.
-- PPT and audio are matched by stem name (e.g. `lecture1.pptx` ↔ `lecture1.mp3`).
-- Notes are output in Markdown format ready to paste into Notion.
-- If no matching audio exists, notes are generated from slide images only.
-- One note file per material file (one .md per .pptx / .pdf).
-- Slide images are the source of truth — read them directly, do NOT rely on text extraction.
-- After transcription, the transcript is saved to `逐字稿/<stem>.txt`. Do NOT delete it.
+---
 
 ## Note Format
 
-Each note must follow this structure:
+Every note must follow this structure:
 
-### 1. Header
+**Header**
 ```
-# [課程名稱] — [教材檔名（不含副檔名）]
-> 來源：`<filename>` | 產生日期：YYYY-MM-DD
+# [課程/主題] — [教材名稱或影片標題]
+> 來源：`<filename or URL>` | 產生日期：YYYY-MM-DD
 ```
 
-### 2. 前言 (Introduction)
-- 2–4 sentences summarising what this lecture covers and why it matters.
-- Written in Traditional Chinese.
+**Body** (in order):
+1. **前言** — 2–4 sentences on what this covers and why it matters (Traditional Chinese)
+2. **大綱** — nested bullet list mirroring H2/H3 structure
+3. **Sections** — `##` major topics, `###` sub-topics
+   - **Bold** key terms on first use; add English/Chinese gloss
+   - Explain the *why*, not just the what
+   - LaTeX for math (`$...$` inline, `$$...$$` block)
+   - Tables for comparisons; `→` for logical conclusions
 
-### 3. 大綱 (Outline)
-- Nested bullet list mirroring the H2/H3 structure of the note body.
+**Language**: Traditional Chinese + English mix is correct and expected.
 
-### 4. Body Sections
-- Use `##` for major topics, `###` for sub-topics.
-- **Bold key terms** on first use; include English/Chinese translation in parentheses.
-- Use nested bullet points for details and explanations.
-- Explain the **why**, not just the what — include reasoning, intuition, and consequences.
-- Use LaTeX (`$...$` inline, `$$...$$` block) for all math formulas.
-- Use Markdown tables for comparisons.
-- Use `→` arrows for conclusions or logical flow.
+**Completeness Check** (required before saving every note):
+- [ ] 前言 is present and meaningful
+- [ ] 大綱 matches actual H2/H3 sections
+- [ ] Every major topic is covered
+- [ ] No section is empty or heading-only
+- [ ] Key terms bolded on first use
+- [ ] All math uses LaTeX
 
-### 5. Language
-- Mix of Traditional Chinese and English is expected and correct.
-- Technical terms may be kept in English with a Chinese gloss, e.g. `Preemption（搶佔）`.
+---
 
-## Completeness Check (Required Before Saving)
+## Rules
 
-Before saving or delivering any note, verify every item:
-
-- [ ] 前言 is present and meaningful (not a placeholder).
-- [ ] 大綱 is present and matches the actual H2/H3 sections.
-- [ ] Every major topic from the PPT/transcript is represented in the body.
-- [ ] No section is left empty or contains only a heading.
-- [ ] Key terms are bolded on first use.
-- [ ] All math uses LaTeX syntax.
-- [ ] The note reads coherently from top to bottom.
-
-Fix any failing items before saving.
-
-## Environment
-
-- Python: 3.11 (conda env `notes-ai`)
-- GPU: NVIDIA GTX 1650 (4GB VRAM)
-- RAM: 24GB
-- Packages: faster-whisper, python-pptx, pdfplumber, ffmpeg
-
-## CJK Token Optimization
-
-- `cjk-token-reducer` is installed at `C:\Users\hxin\.cargo\bin\cjk-token-reducer.exe`
-- Configured as a Claude Code hook to translate Chinese input → English before sending
-- Reduces token usage by 35-50% for CJK text
+- **Python**: always use `conda run -n notes-ai python`. Never pip-install into local Python.
+- **Conda**: `C:\ProgramData\miniconda3\Scripts\conda.exe`
+- **GPU**: RTX 5070 Ti (16GB VRAM, CUDA 12.9) — use `device="cuda"` for Whisper
+- **Slide images are source of truth** for course notes — read PNGs directly, do not rely on text extraction
+- After any task, **update** `memory/skills_inventory.md` with new gaps or learnings found
