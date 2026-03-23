@@ -1,556 +1,596 @@
 # 嵌入式即時系統 — uCOS Part 3 Kernel Structure
 
-> 來源：`uCOS Part 3 kernel structure.pdf` | 產生日期：2026-03-23
+> 來源：`uCOS Part 3 kernel structure.pdf` | 產生日期：2026-03-24
 
 ## 前言
 
 ---
 
-本份筆記整理 uC/OS-II Part 3 的核心實作細節，從檔案架構、臨界區機制、任務建立與管理，深入到 TCB 資料結構、O(1) 就緒列表、排程器實作、情境切換機制、ISR 十步驟模板、時鐘節拍掃描、排程鎖定，以及啟動序列。相較於 Part 2 的系統概念，Part 3 直接呈現原始碼層面的實作邏輯，是理解 uC/OS-II 可移植性設計與各平台 port 的關鍵材料。
+本份筆記整理 uC/OS-II Part 3 的核心結構實作，涵蓋臨界區的保護機制（為何關閉中斷優於旗號）、任務結構與生命週期、TCB 的完整欄位解析、O(1) 點陣圖就緒列表的設計與操作、`OS_Sched()` 排程器原始碼、任務層級與 ISR 層級情境切換的差異、十步驟 ISR 模板、`OSTimeTick()` 的 O(n) 掃描與 Delta List 替代方案、排程器鎖定機制，以及 `OSInit()` → `OSStart()` 啟動序列。這些內容是 uC/OS-II 移植與系統設計面試的核心考點。
 
 ## 大綱
 
 ---
 
-- uC/OS-II 檔案架構（五層模型）
-- 臨界區（Critical Section）
-  - 為何不用旗號保護臨界區
-  - 關閉中斷機制（Method 1 vs Method 2）
-- 任務結構與管理
-  - 任務程式碼格式
-  - 任務管理 API
-  - 五大任務狀態（詳解）
-- 任務控制區塊（`OS_TCB`）
-  - 關鍵欄位說明
-  - Free List 管理
-  - `OS_TCBInit()` 原始碼
-- 就緒列表（Ready List）
-  - 8×8 點陣圖設計
-  - O(1) 加入與移除
-  - `OSMapTbl` 與 `OSUnMapTbl`
-- 排程器（`OS_Sched()`）
-  - 原始碼解析
-  - `OS_TASK_SW()` 軟體中斷
-- 情境切換機制
-  - 任務層級 vs. ISR 層級
-  - 情境切換步驟
-- ISR 處理（十步驟模板）
+- 臨界區（Critical Sections）
+  - 臨界區定義
+  - 為何不用旗號保護核心臨界區
+  - 為何 ISR 不可呼叫 Blocking API
+  - 關閉中斷作為核心臨界區保護機制
+  - `OS_CRITICAL_METHOD=2`：PSW Push/Pop 實作
+  - 為何不用 Method 1（直接啟用/關閉）
+  - 使用規則與注意事項
+- 任務結構（Task Structure）
+  - 任務的定義與形式
+  - 優先權管理（64 個等級）
+  - 任務生命週期 API
+  - 任務狀態詳解（五狀態 + 轉換條件）
+- 任務控制區塊（TCB）
+  - TCB 結構全覽
+  - 各欄位功能說明
+  - TCB 自由列表與 `OS_TCBInit()`
+- 就緒列表與排程（Ready List and Scheduling）
+  - 就緒列表設計（O(1) 點陣圖）
+  - `OSRdyGrp` + `OSRdyTbl[8]` 結構
+  - `OSMapTbl`：新增 / 移除任務操作
+  - `OSUnMapTbl`：O(1) 查找最高優先權
+  - `OS_Sched()` 原始碼解析
+  - 任務層級情境切換（Task-Level Context Switch）
+- 中斷處理（Interrupt Handling）
+  - 十步驟 ISR 模板
   - `OSIntEnter()` / `OSIntExit()` 原始碼
-  - `OSIntCtxSw()` vs `OS_TASK_SW()`
-- `OSTimeTick()` 實作
-  - 線性掃描 O(n)
-  - Delta List 改良
-- 排程鎖定（`OSSchedLock()` / `OSSchedUnlock()`）
-- 閒置任務（`OS_TaskIdle`）
-- 啟動序列（`OSInit()` → `OSStart()` → `OSStartHighRdy()`）
-
-## uC/OS-II 檔案架構（五層模型）
-
----
-
-uC/OS-II 以嚴格的分層架構實現跨平台可移植性，共分五層：
-
-| 層級 | 檔案 / 元件 | 說明 |
-|------|------------|------|
-| **應用層** | 使用者程式碼 | 任務函式、main()、硬體初始化 |
-| **處理器無關核心** | `ucos_ii.c` / `ucos_ii.h` | 排程、TCB、事件管理等核心邏輯；不依賴任何硬體 |
-| **核心組態** | `OS_CFG.H` | 編譯期開關：最大任務數、各功能啟用與否、堆疊大小等 |
-| **處理器相關 Port** | `OS_CPU.H` / `OS_CPU_A.ASM` / `OS_CPU_C.C` | 情境切換（組語）、資料型別定義、臨界區機制；每個目標平台各有一份 |
-| **硬體層** | CPU / BSP | 實體處理器與板級支援套件 |
-
-- **可移植性設計**：移植到新平台只需重新撰寫 Port 層，核心程式碼完全不動。
-- **`OS_CFG.H` 的作用**：在編譯期裁剪核心體積，不需要的功能（如記憶體管理、訊息佇列）可直接關閉，減少 ROM/RAM 佔用。
-
-## 臨界區（Critical Section）
+  - ISR 層級 vs. 任務層級情境切換
+- 時鐘節拍（Clock Tick）
+  - `OSTimeTick()` 原始碼
+  - O(n) 線性掃描 vs. Delta List
+- 排程器鎖定（Scheduler Lock）
+  - `OSSchedLock()` / `OSSchedUnlock()` 原始碼
+  - 三種競爭條件防護機制對比
+  - 中斷處理 Do's and Don'ts
+- 閒置任務（Idle Task）
+- 啟動序列（Startup Sequence）
 
 ---
 
-**臨界區（Critical Section）**是指不可被中斷打斷的程式碼片段，通常存取共用資料結構（如 TCB 鏈表、就緒列表）。若執行到一半被中斷，可能導致資料不一致。
+## 臨界區（Critical Sections）
 
-### 為何不用旗號（Semaphore）保護臨界區
+---
 
-- **旗號本身也需要臨界區**：`OSSemPend()` 在修改旗號計數前，本身就需要一種互斥機制；若用旗號保護臨界區，會形成雞生蛋的循環依賴。
-- **ISR 不可呼叫 blocking API**：ISR 中不允許呼叫 `OSSemPend()` 等可能阻塞的 API（否則 ISR 可能永遠無法返回），因此旗號無法在 ISR 與任務之間共用保護機制。
-- **關閉中斷是唯一正確做法**：透過關閉 CPU 中斷，可同時防止 ISR 與其他任務干擾臨界區，且開銷極小。
+**臨界區（Critical Section）**是一段不安全於競爭條件（race condition）的程式碼，又稱為不可重入程式碼（non-reentrant code）。
 
-### 關閉中斷機制（Method 1 vs Method 2）
+### 臨界區定義
 
-uC/OS-II 提供三種 `OS_CRITICAL_METHOD`，x86 port 使用 **Method 2**：
+- **核心內部的 task-task race**：核心程式碼中的臨界區通常很短；使用旗號或 mutex 保護過於耗費資源（too heavy-duty），且在臨界區內不宜發生情境切換。
+- **task-ISR race**：ISR 與任務共享資料時形成 task-ISR race，旗號無法解決，因為 ISR 不可呼叫 blocking API。
+
+### 為何 ISR 不可呼叫 Blocking API
+
+ISR 中呼叫 `OSSemPend()` 等 blocking API 會導致兩個問題：
+
+- **潛在死鎖（Potential Deadlock）**：被中斷的任務本身可能正是負責處理當前中斷的一部分；若 ISR 等待該任務持有的旗號，系統即死鎖。
+- **非預期的長延遲（Unexpected Long Delay）**：讓被中斷任務的等待時間無法預測，破壞即時性保證。
+
+### 關閉中斷作為核心臨界區保護機制
+
+關閉中斷是 uC/OS-II 保護核心臨界區的核心機制，適用原因有二：
+
+- **適用於核心程式碼**：核心臨界區通常很短，關閉中斷的代價可接受。
+- **解決 task-ISR race**：ISR 無法在中斷關閉期間搶占，可安全保護共享資料。
+
+注意：此方法在多處理器系統中無效，多處理器需改用 **spinlock**。
 
 ```c
-/* Method 2: 使用旗標暫存器（PSW）堆疊推入/彈出 */
-#define OS_ENTER_CRITICAL()  asm PUSHF; asm CLI   /* 儲存中斷狀態並關閉中斷 */
-#define OS_EXIT_CRITICAL()   asm POPF             /* 還原中斷狀態（可能重新開啟） */
+{
+    OS_ENTER_CRITICAL();  /* 關閉中斷，進入臨界區 */
+    /* Critical Section */
+    OS_EXIT_CRITICAL();   /* 還原中斷狀態，離開臨界區 */
+}
 ```
 
-- **Method 1 的問題**：直接 `CLI`（關）/ `STI`（開），若呼叫 `OS_EXIT_CRITICAL()` 前原本中斷已是關閉狀態，`STI` 會錯誤地開啟中斷，破壞外層臨界區。
-- **Method 2 的優點**：`PUSHF` 儲存當前中斷旗標，`POPF` 還原而非強制開啟，可正確處理巢狀臨界區（outer critical section 不受 inner critical section 的 `POPF` 影響）。
+### `OS_CRITICAL_METHOD=2`：PSW Push/Pop 實作
 
-## 任務結構與管理
+uC/OS-II 的 x86 移植使用 **Method 2**：將處理器狀態字（PSW, Processor Status Word）推入 / 彈出堆疊，精確記錄巢狀呼叫時的中斷狀態。
+
+```c
+/* x86 port — OS_CRITICAL_METHOD == 2 */
+#define OS_ENTER_CRITICAL()  asm("PUSHF")  /* 將 PSW（含 IF 旗標）壓入堆疊 */
+#define OS_EXIT_CRITICAL()   asm("POPF")   /* 從堆疊還原 PSW */
+```
+
+- **運作原理**：`PUSHF` 將目前 PSW 壓入堆疊（含中斷啟用旗標 IF）；`POPF` 從堆疊還原 PSW，自動恢復呼叫前的中斷狀態，而非無條件啟用。
+- **巢狀呼叫安全**：每次 `PUSHF/POPF` 使用獨立的堆疊 frame，巢狀的 `OS_ENTER_CRITICAL` / `OS_EXIT_CRITICAL` 可精確還原各層中斷狀態。
+
+### 為何不用 Method 1（直接啟用/關閉）
+
+**Method 1** 使用無條件的 `disable_interrupt()` / `enable_interrupt()` 指令，存在根本缺陷：
+
+- **巢狀呼叫破壞**：若核心服務 A 在已關閉中斷的狀態下呼叫核心服務 B，服務 B 的 `OS_EXIT_CRITICAL()` 會立即重新啟用中斷，而非等到服務 A 的 `OS_EXIT_CRITICAL()` 才啟用。這使中斷在服務 A 的臨界區尚未結束時被重新開啟，導致競爭條件。
+
+### 使用規則與注意事項
+
+- **中斷關閉時間越短越好**：中斷關閉的最長持續時間直接決定中斷延遲（interrupt latency）的下界，影響整個 RTOS 的即時性規格。
+- **禁止在中斷關閉期間呼叫系統服務**：例如中斷關閉時呼叫 `OSTimeDly()`，時鐘節拍中斷被阻擋，導致系統掛起（hang）。
+- **基本規則**：不可在中斷關閉狀態下（或在 ISR 中）呼叫任何系統服務。
 
 ---
 
-### 任務程式碼格式
+## 任務結構（Task Structure）
 
-uC/OS-II 的任務函式必須符合固定原型，且主體為無限迴圈：
+---
+
+**任務（Task）**是主動執行計算的實體。在即時系統中，週期性任務的標準結構為一個大型無限迴圈。
+
+### 任務的定義與形式
 
 ```c
-void MyTask(void *pdata)    /* pdata: 建立任務時傳入的參數指標 */
+void YourTask (void *pdata)
 {
-    /* 初始化工作（只執行一次） */
     for (;;) {
-        /* 任務主體邏輯 */
-        OSTimeDly(10);      /* 必須呼叫至少一個 blocking API，讓出 CPU */
+        /* USER CODE */
+        /* 必須呼叫其中一種讓出 CPU 的 API，否則低優先權任務永遠無法執行 */
+        OSMboxPend(...);          /* 等待信箱訊息 */
+        OSSemPend(...);           /* 等待旗號 */
+        OSTimeDly(...);           /* 計時延遲 */
+        OSTaskDel(OS_PRIO_SELF);  /* 刪除自身（非週期性任務用） */
+        /* USER CODE */
     }
 }
 ```
 
-- **強制 blocking 呼叫**：若任務從不呼叫任何 blocking API，它將永遠佔用 CPU，其他低優先權任務永遠無法執行。
-- **不可 return**：任務函式一旦返回，核心行為未定義；若需終止任務，應呼叫 `OSTaskDel(OS_PRIO_SELF)`。
+- **無限迴圈**：週期性任務不可自行 return，必須永遠循環執行。
+- **blocking call 必要性**：每次迴圈必須呼叫至少一個 blocking API，讓排程器得以切換至其他任務。
 
-### 任務管理 API
+### 優先權管理（64 個等級）
 
-| API | 功能 |
-|-----|------|
-| `OSTaskCreate(task, pdata, stk, prio)` | 建立任務（基本版）；stk 指向堆疊頂端 |
-| `OSTaskCreateExt(...)` | 建立任務（擴充版）；額外支援堆疊監控、擴充 TCB 指標 |
-| `OSTaskChangePrio(oldprio, newprio)` | 動態修改任務優先權；優先權必須唯一 |
-| `OSTaskDel(prio)` | 刪除任務，釋放 TCB 回 free list |
-| `OSTaskSuspend(prio)` | 掛起任務（進入額外的 Suspend 狀態） |
-| `OSTaskResume(prio)` | 恢復被掛起的任務 |
+- **優先權範圍**：0 到 63，共 64 個等級；數字越小優先權越高，每個任務擁有唯一優先權。
+- **保留等級**：62 保留給統計任務（Stat Task），63 保留給閒置任務（Idle Task），應用任務可使用 0–61。
+- **可排程性考量**：唯一優先權在嵌入式系統中通常可行，因任務數量有限；但若可用優先權不足，會損害即時排程器的可排程性（schedulability）。
 
-### 五大任務狀態（詳解）
+### 任務生命週期 API
 
-uC/OS-II 以 `OSTCBStat` 欄位記錄任務狀態，各狀態的內部意義：
+- **建立任務**：`OSTaskCreate(task, pdata, ptos, prio)` 或 `OSTaskCreateExt(...)` 初始化 TCB、堆疊、優先權表與就緒列表。
+- **變更優先權**：`OSTaskChangePrio(oldPrio, newPrio)` 在執行期間動態調整任務優先權。
+- **刪除任務**：任務可呼叫 `OSTaskDel(OS_PRIO_SELF)` 刪除自身；非週期性任務在工作完成後即可刪除。
 
-- **Dormant（休眠）**：`OSTaskCreate()` 尚未呼叫，或 `OSTaskDel()` 已呼叫；TCB 在 free list 中，不在就緒列表或等待列表。
-- **Ready（就緒）**：位於就緒列表（`OSRdyTbl[]`），`OSTCBDly == 0` 且 `OSTCBStat == 0`，等待排程器選中。
-- **Running（執行中）**：`OSTCBCur` 指向此任務，當前佔用 CPU；邏輯上等同於處於 Ready 狀態但已被選中執行。
-- **Waiting（等待中）**：`OSTCBDly > 0`（計時等待）或 `OSTCBStat != 0`（等待事件）；任務從就緒列表移除，`OSTimeTick()` 或事件發布時才移回。
-- **ISR Running（中斷執行中）**：CPU 正執行 ISR；`OSIntNesting > 0`；被中斷任務的情境儲存在其堆疊中，等待 ISR 結束後恢復。
+### 任務狀態詳解（五狀態 + 轉換條件）
 
-## 任務控制區塊（`OS_TCB`）
-
----
-
-**任務控制區塊（Task Control Block, TCB）**是核心追蹤任務執行狀態的核心資料結構，每個任務對應一個 `OS_TCB` 實例。
-
-### 關鍵欄位說明
-
-| 欄位 | 型別 | 說明 |
+| 狀態 | 說明 | 進入條件 |
 |------|------|------|
-| `OSTCBStkPtr` | `OS_STK *` | 指向任務堆疊頂端（情境切換時的存取點） |
-| `OSTCBExtPtr` | `void *` | 使用者自定擴充資料指標（可掛載任意結構） |
-| `OSTCBStkBottom` | `OS_STK *` | 堆疊底端（用於堆疊溢位偵測） |
-| `OSTCBStkSize` | `INT32U` | 堆疊大小（`OSTaskStkChk()` 使用） |
-| `OSTCBOpt` | `INT16U` | 建立選項旗標（如 `OS_TASK_OPT_SAVE_FP`、`OS_TASK_OPT_STK_CHK`） |
-| `OSTCBId` | `INT16U` | 任務 ID（`OSTaskCreateExt()` 專用） |
-| `OSTCBNext` / `OSTCBPrev` | `OS_TCB *` | 雙向鏈結串列指標（串接所有已建立的 TCB） |
-| `OSTCBEventPtr` | `OS_EVENT *` | 指向任務正在等待的事件控制區塊（ECB） |
-| `OSTCBMsg` | `void *` | 直接傳遞的訊息指標（用於 mailbox） |
-| `OSTCBDly` | `INT32U` | 剩餘等待節拍數；`OSTimeTick()` 每次遞減，歸零時移回就緒列表 |
-| `OSTCBStat` | `INT8U` | 任務狀態旗標（0 = Ready，非 0 = 等待某事件） |
-| `OSTCBPrio` | `INT8U` | 任務優先權（0–63） |
-| `OSTCBX` / `OSTCBY` | `INT8U` | 就緒列表的 bit 位置（`X = prio & 0x07`，`Y = prio >> 3`） |
-| `OSTCBBitX` / `OSTCBBitY` | `INT8U` | 對應的位元遮罩（`OSMapTbl[X]`、`OSMapTbl[Y]`） |
-| `OSTCBDelReq` | `INT8U` | 外部刪除請求旗標（`OSTaskDelReq()` 使用） |
+| **Dormant（休眠）** | 程式碼存在於記憶體但未建立為任務 | 初始狀態；`OSTaskDel()` 後回到此狀態 |
+| **Ready（就緒）** | 已建立，等待 CPU | `OSTaskCreate()` 後；事件發生或 `OSTimeTick()` 到期後 |
+| **Running（執行中）** | 正佔用 CPU | 排程器從 Ready 中選出此任務 |
+| **Waiting（等待中）** | 等待計時、旗號、訊息或旗標 | 呼叫 `OSTimeDly()`、`OSSemPend()`、`OSMboxPend()`、`OSQPend()`、`OSFlagPend()`、`OSTaskSuspend()` |
+| **ISR Running** | CPU 正執行 ISR，任務堆疊被 ISR 使用 | 硬體中斷觸發 |
 
-### Free List 管理
+額外轉換規則：
 
-- **初始化**：`OSInit()` 呼叫時，核心將所有 `OS_MAX_TASKS` 個 TCB 以 `OSTCBNext` 串接成單向 free list，`OSTCBFreeList` 指向串列頭。
-- **建立任務時**：從 `OSTCBFreeList` 取出一個 TCB，填入任務資訊，加入雙向的已建立 TCB 鏈（`OSTCBList`）。
-- **刪除任務時**：將 TCB 從 `OSTCBList` 摘除，歸還至 `OSTCBFreeList` 頭部。
-
-### `OS_TCBInit()` 原始碼解析
-
-```c
-INT8U OS_TCBInit(INT8U prio, OS_STK *ptos, OS_STK *pbos,
-                 INT16U id, INT32U stk_size,
-                 void *pext, INT16U opt)
-{
-    OS_TCB *ptcb;
-
-    OS_ENTER_CRITICAL();                      /* 進入臨界區 */
-    ptcb = OSTCBFreeList;                     /* 從 free list 取出 TCB */
-    if (ptcb != (OS_TCB *)0) {
-        OSTCBFreeList = ptcb->OSTCBNext;      /* 更新 free list 頭 */
-        OS_EXIT_CRITICAL();                   /* 離開臨界區（越早越好） */
-
-        ptcb->OSTCBStkPtr  = ptos;           /* 儲存堆疊頂端指標 */
-        ptcb->OSTCBPrio    = prio;
-        ptcb->OSTCBStat    = OS_STAT_RDY;    /* 初始狀態：就緒 */
-        ptcb->OSTCBDly     = 0;
-        ptcb->OSTCBExtPtr  = pext;
-        ptcb->OSTCBStkBottom = pbos;
-        ptcb->OSTCBStkSize   = stk_size;
-        ptcb->OSTCBOpt       = opt;
-        ptcb->OSTCBId        = id;
-
-        /* 計算就緒列表位置 */
-        ptcb->OSTCBY   = prio >> 3;                  /* Y = prio / 8 */
-        ptcb->OSTCBBitY = OSMapTbl[ptcb->OSTCBY];
-        ptcb->OSTCBX   = prio & 0x07;                /* X = prio % 8 */
-        ptcb->OSTCBBitX = OSMapTbl[ptcb->OSTCBX];
-
-        OS_ENTER_CRITICAL();
-        /* 插入雙向鏈 OSTCBList */
-        ptcb->OSTCBNext = OSTCBList;
-        if (OSTCBList != (OS_TCB *)0)
-            OSTCBList->OSTCBPrev = ptcb;
-        OSTCBList = ptcb;
-        ptcb->OSTCBPrev = (OS_TCB *)0;
-
-        /* 加入就緒列表 */
-        OSRdyGrp        |= ptcb->OSTCBBitY;
-        OSRdyTbl[ptcb->OSTCBY] |= ptcb->OSTCBBitX;
-        OS_EXIT_CRITICAL();
-        return OS_NO_ERR;
-    }
-    OS_EXIT_CRITICAL();
-    return OS_NO_MORE_TCB;                    /* TCB 已耗盡 */
-}
-```
-
-- **關鍵設計**：先縮短第一個臨界區（只取 TCB），再以第二個臨界區修改共用結構；避免持鎖時間過長影響中斷延遲。
-
-## 就緒列表（Ready List）
+- **Running 任務永遠被 ISR 搶占**，除非中斷已被關閉。
+- **ISR 返回時**，排程器重新評估是否需要情境切換（呼叫 `OSIntExit()`）。
+- **任何時刻若所有任務都不在 Ready 狀態**，閒置任務（priority 63）執行。
 
 ---
 
-**就緒列表（Ready List）**使用 8×8 點陣圖設計，以 O(1) 時間找出最高優先權就緒任務，是 uC/OS-II 排程效率的核心。
+## 任務控制區塊（TCB）
 
-### 8×8 點陣圖設計
+---
 
-- **`OSRdyGrp`**：8-bit 整數，每個 bit 對應一個「組」（group）；若某組中有任何就緒任務，對應 bit 為 1。
-- **`OSRdyTbl[8]`**：長度 8 的陣列，每個元素為 8-bit 整數，對應各組內的 8 個優先權 bit。
-- **優先權對應**：優先權 `prio` 對應到 `OSRdyTbl[prio >> 3]` 的第 `(prio & 0x07)` 個 bit。
+**TCB（Task Control Block）**是核心為每個任務維護的資料結構，記錄任務的所有執行狀態。CPU 暫存器儲存在任務的堆疊中，而非 TCB 本身。
 
-```
-OSRdyGrp:        bit7  bit6  bit5  bit4  bit3  bit2  bit1  bit0
-                  ↕     ↕     ↕     ↕     ↕     ↕     ↕     ↕
-OSRdyTbl[0..7]: [p7-0][p15-8][p23-16][p31-24][p39-32][p47-40][p55-48][p63-56]
-```
-
-### O(1) 加入與移除
-
-**加入任務（設為就緒）**：
+### TCB 結構全覽
 
 ```c
-OSRdyGrp              |= OSMapTbl[prio >> 3];  /* 標記組 */
-OSRdyTbl[prio >> 3]   |= OSMapTbl[prio & 0x07]; /* 標記組內 bit */
+typedef struct os_tcb {
+    OS_STK        *OSTCBStkPtr;     /* 當前堆疊頂端指標（TOS） */
+
+    /* 以下欄位需 OS_TASK_CREATE_EXT_EN == 1 */
+    void          *OSTCBExtPtr;     /* 使用者定義的 TCB 擴展指標 */
+    OS_STK        *OSTCBStkBottom;  /* 堆疊底端指標（BOS） */
+    INT32U         OSTCBStkSize;    /* 堆疊大小（元素數，非位元組） */
+    INT16U         OSTCBOpt;        /* OSTaskCreateExt() 的選項旗標 */
+    INT16U         OSTCBId;         /* 任務識別碼（未來擴展用） */
+
+    struct os_tcb *OSTCBNext;       /* 雙向鏈結：下一個 TCB */
+    struct os_tcb *OSTCBPrev;       /* 雙向鏈結：上一個 TCB */
+
+    OS_EVENT      *OSTCBEventPtr;   /* 正在等待的事件控制區塊指標 */
+    void          *OSTCBMsg;        /* 從信箱或佇列接收的訊息指標 */
+
+    INT16U         OSTCBDly;        /* 延遲計數 / 等待逾時計數 */
+    INT8U          OSTCBStat;       /* 任務狀態（0 = Ready） */
+    INT8U          OSTCBPrio;       /* 任務優先權 */
+
+    INT8U          OSTCBX;          /* priority & 0x07（就緒列表欄位索引） */
+    INT8U          OSTCBY;          /* priority >> 3（就緒列表列索引） */
+    INT8U          OSTCBBitX;       /* OSMapTbl[priority & 0x07]（欄位遮罩） */
+    INT8U          OSTCBBitY;       /* OSMapTbl[priority >> 3]（列遮罩） */
+
+    BOOLEAN        OSTCBDelReq;     /* 刪除請求旗標（OS_TASK_DEL_EN） */
+} OS_TCB;
 ```
 
-**移除任務（移出就緒）**：
+### 各欄位功能說明
+
+- **`OSTCBStkPtr`**：指向當前堆疊頂端（TOS）；宣告為結構第一個欄位，以便組合語言直接以 offset=0 存取，無需計算偏移量。
+- **`OSTCBExtPtr`**：指向使用者自定義的 TCB 擴展資料（需 `OSTaskCreateExt()` 建立，設定 `OS_TASK_CREATE_EXT_EN=1`）。
+- **`OSTCBStkBottom`**：指向堆疊底端（BOS）；搭配 `OSTCBStkSize` 用於堆疊使用量檢查（`OSTaskStkChk()`）。
+- **`OSTCBStkSize`**：堆疊大小以元素數（element count）計算，非位元組；x86 下每個元素為 16 bits（`OS_STK` 型別），總位元組數 = `OSTCBStkSize × sizeof(OS_STK)`。
+- **`OSTCBOpt`**：選項旗標，包含：
+  - `OS_TASK_OPT_STK_CHK`：啟用堆疊使用量檢查
+  - `OS_TASK_OPT_STK_CLR`：建立時清零堆疊
+  - `OS_TASK_OPT_SAVE_FP`：浮點運算任務需在情境切換時額外儲存 FPU 暫存器
+- **`OSTCBNext` / `OSTCBPrev`**：雙向鏈結，將所有使用中的 TCB 串接成 TCB 鏈結串列。
+- **`OSTCBEventPtr`**：指向任務正在等待的事件控制區塊（ECB）。
+- **`OSTCBDly`**：計時延遲計數器；`OSTimeDly()` 設定後，`OSTimeTick()` 每次遞減一，歸零時喚醒任務。也用於等待事件時的逾時計數。
+- **`OSTCBStat`**：任務狀態旗標；0 表示就緒（Ready to run）。
+- **`OSTCBX / OSTCBY / OSTCBBitX / OSTCBBitY`**：預先計算的就緒列表索引與遮罩，用於加速就緒列表操作（O(1)）：
 
 ```c
+OSTCBY    = priority >> 3;               /* 列索引（0–7） */
+OSTCBBitY = OSMapTbl[priority >> 3];     /* 列遮罩 */
+OSTCBX    = priority & 0x07;             /* 欄索引（0–7） */
+OSTCBBitX = OSMapTbl[priority & 0x07];   /* 欄遮罩 */
+```
+
+- **`OSTCBDelReq`**：布林值，表示是否有其他任務請求刪除此任務（`OSTaskDelReq()` 機制用）。
+
+### TCB 自由列表與 `OS_TCBInit()`
+
+- **靜態分配**：uC/OS-II 啟動時依 `OS_MAX_TASKS`（定義於 `OS_CFG.H`）建立 `OSTCBTbl[]` 陣列，將所有 TCB 以單向鏈結串接為 **TCB 自由列表（free list）**，頭指標為 `OSTCBFreeList`。
+- **動態分配模擬**：任務建立時從 `OSTCBFreeList` 取出一個 TCB；任務刪除時將 TCB 歸還給 `OSTCBFreeList`。
+- **`OS_TCBInit()`**：由 `OSTaskCreate()` 呼叫，初始化 TCB 各欄位、將 TCB 插入 TCB 鏈結串列，並將任務加入就緒列表。
+
+---
+
+## 就緒列表與排程（Ready List and Scheduling）
+
+---
+
+### 就緒列表設計（O(1) 點陣圖）
+
+uC/OS-II 以點陣圖（bitmap）實作就緒列表，可在 O(1) 時間內找到最高優先權的就緒任務。
+
+設計選項的複雜度對比：
+
+| 資料結構 | 找最高優先權 | 說明 |
+|------|------|------|
+| **線性串列** | O(n) | 需掃描所有任務 |
+| **最大堆積（Max Heap）** | O(log n) | 插入與刪除各 O(log n) |
+| **點陣圖（Bitmap）** | O(1) | 使用查找表（lookup table）直接定位 |
+
+### `OSRdyGrp` + `OSRdyTbl[8]` 結構
+
+就緒列表由兩個全域變數組成：
+
+- **`OSRdyGrp`**（8 bits）：每個 bit 對應一個群組（group），群組 i 中有任何任務就緒時，bit i 置 1。
+- **`OSRdyTbl[8]`**（每個 8 bits）：`OSRdyTbl[y]` 記錄群組 y 中哪些優先權就緒；bit x 置 1 表示優先權 `(y×8 + x)` 的任務就緒。
+
+映射關係：優先權 `prio` 的群組索引 `y = prio >> 3`，欄索引 `x = prio & 0x07`。
+
+### `OSMapTbl`：新增 / 移除任務操作
+
+```c
+/* OSMapTbl 將索引（0–7）轉換為對應的單一 bit 遮罩 */
+/* Index: 0    1    2    3    4    5    6    7   */
+/* Mask:  0x01 0x02 0x04 0x08 0x10 0x20 0x40 0x80 */
+
+/* 將任務加入就緒列表 */
+OSRdyGrp             |= OSMapTbl[prio >> 3];      /* 設定 OSRdyGrp 的群組 bit */
+OSRdyTbl[prio >> 3]  |= OSMapTbl[prio & 0x07];   /* 設定 OSRdyTbl 的任務 bit */
+
+/* 將任務從就緒列表移除 */
 if ((OSRdyTbl[prio >> 3] &= ~OSMapTbl[prio & 0x07]) == 0)
-    OSRdyGrp &= ~OSMapTbl[prio >> 3];  /* 整組清空才清除 group bit */
+    OSRdyGrp &= ~OSMapTbl[prio >> 3]; /* 群組內無任何就緒任務時，清除群組 bit */
 ```
 
-**找出最高優先權就緒任務**：
+### `OSUnMapTbl`：O(1) 查找最高優先權
+
+`OSUnMapTbl[256]` 是一張預先計算的查找表，輸入一個 8-bit 值，輸出其最低有效位（LSB）的位置（即最高優先權任務的索引）。
 
 ```c
-y = OSUnMapTbl[OSRdyGrp];                  /* 找最高優先權非空的組 */
-x = OSUnMapTbl[OSRdyTbl[y]];              /* 找組內最高優先權 */
-OSPrioHighRdy = (y << 3) + x;             /* 合成優先權數值 */
+/* 找出就緒列表中最高優先權的任務 */
+y    = OSUnMapTbl[OSRdyGrp];          /* 找出有就緒任務的最高優先群組 */
+x    = OSUnMapTbl[OSRdyTbl[y]];       /* 在群組內找出最高優先權任務 */
+prio = (y << 3) + x;                  /* 計算實際優先權數值 */
 ```
 
-### `OSMapTbl` 與 `OSUnMapTbl`
+範例：若 `OSRdyGrp = 0b00110010`，`OSUnMapTbl[0b00110010] = 1`（最低有效 1 的位置）。
 
-- **`OSMapTbl[8]`**：將索引 0–7 對應至對應的 bit 遮罩（`{0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80}`）。
-- **`OSUnMapTbl[256]`**：256 元素的查找表，輸入一個 8-bit 值，輸出其最低有效位（LSB）的位置（0–7）；這等同於 O(1) 的 find-lowest-set-bit 操作，避免逐 bit 掃描。
-
-## 排程器（`OS_Sched()`）
-
----
-
-`OS_Sched()` 是 uC/OS-II 的任務層級排程器，在每次可能影響任務優先序的事件後被呼叫（如 `OSSemPost()`、`OSTimeDly()` 返回等）。
-
-### 原始碼解析
+### `OS_Sched()` 原始碼解析
 
 ```c
-void OS_Sched(void)
+void OS_Sched (void)
 {
     INT8U y;
     OS_ENTER_CRITICAL();
-
-    /* 僅在非 ISR、排程未鎖定時才排程 */
-    if (OSIntNesting == 0 && OSLockNesting == 0) {
-        y = OSUnMapTbl[OSRdyGrp];                      /* 找最高優先權就緒組 */
-        OSPrioHighRdy = (INT8U)((y << 3) +
-                        OSUnMapTbl[OSRdyTbl[y]]);      /* 計算最高優先權 */
-
-        if (OSPrioHighRdy != OSPrioCur) {              /* 需要切換才執行 */
-            OSTCBHighRdy = OSTCBPrioTbl[OSPrioHighRdy]; /* 取目標 TCB */
-            OSCtxSwCtr++;                               /* 統計計數器 */
-            OS_TASK_SW();                               /* 觸發情境切換 */
+    /* (1) 若排程器已鎖定或正在處理中斷，不執行排程 */
+    if ((OSLockNesting | OSIntNesting) == 0) {
+        /* (2) 找出最高優先權就緒任務（HPT） */
+        y = OSUnMapTbl[OSRdyGrp];
+        OSPrioHighRdy = (INT8U)((y << 3) + OSUnMapTbl[OSRdyTbl[y]]);
+        /* (3) 若 HPT 不是當前任務，執行情境切換 */
+        if (OSPrioHighRdy != OSPrioCur) {
+            OSTCBHighRdy = OSTCBPrioTbl[OSPrioHighRdy];
+            OSCtxSwCtr++;           /* (4) 更新情境切換計數器 */
+            OS_TASK_SW();           /* (5) 觸發軟體中斷 INT 80h */
         }
     }
     OS_EXIT_CRITICAL();
 }
 ```
 
-- **`OSIntNesting == 0`**：確保不在 ISR 中（ISR 使用 `OSIntExit()` 觸發排程）。
-- **`OSLockNesting == 0`**：確保排程未被 `OSSchedLock()` 鎖定。
-- **`OSPrioHighRdy != OSPrioCur`**：只有在最高優先權任務改變時才執行情境切換，避免不必要的切換開銷。
+- **`(OSLockNesting | OSIntNesting) == 0`**：排程器鎖定（`OSSchedLock`）或正在處理中斷時，不執行排程，避免在不適當的時機切換任務。
+- **`OS_TASK_SW()`**：展開為 `asm("int 0x80")`，產生軟體中斷 80h，進入情境切換 ISR。
 
-### `OS_TASK_SW()` 軟體中斷
+### 任務層級情境切換（Task-Level Context Switch）
 
-```c
-#define OS_TASK_SW()  asm INT 80h
-```
+情境切換本質上發生在 ISR 返回時（clock tick ISR 或 context-switch ISR）。
 
-- **機制**：觸發軟體中斷 80h，CPU 跳至對應的中斷服務常式執行情境切換。
-- **設計原因**：透過軟體中斷統一情境切換的入口，使任務層級切換（`OS_TASK_SW()`）與 ISR 層級切換（`OSIntCtxSw()`）共用相同的暫存器儲存/還原框架，但起點不同。
-
-## 情境切換機制
-
----
-
-### 任務層級 vs. ISR 層級
-
-| 切換類型 | 觸發點 | 使用函式 | 起點差異 |
-|----------|--------|----------|---------|
-| **任務層級** | `OS_Sched()` 內部 | `OS_TASK_SW()` | 需完整儲存所有暫存器 |
-| **ISR 層級** | `OSIntExit()` 內部 | `OSIntCtxSw()` | ISR 已儲存部分暫存器，跳過重複儲存 |
-
-### 情境切換步驟（任務層級）
-
-1. **儲存 LPT（低優先權任務）情境**：將所有 CPU 暫存器壓入 LPT 的堆疊。
-2. **更新 `OSTCBCur->OSTCBStkPtr`**：將 LPT 的當前堆疊指標（SP）儲存至其 TCB，供下次恢復使用。
-3. **`OSTCBCur = OSTCBHighRdy`**：更新全域指標指向新的執行任務。
-4. **`OSPrioCur = OSPrioHighRdy`**：更新當前優先權記錄。
-5. **載入 HPT（高優先權任務）的 `OSTCBStkPtr`**：從 HPT 的 TCB 取出堆疊指標，設定 SP。
-6. **還原 HPT 情境**：從 HPT 的堆疊彈出所有暫存器。
-7. **`IRET`**：CPU 跳至 HPT 上次被中斷的位置繼續執行。
-
-## ISR 處理（十步驟模板）
+- **任務主動讓出 CPU 時**（task-level context switch）：沒有真實硬體中斷，因此以 **`INT 80h` 軟體中斷**模擬，使情境切換可在 ISR 框架內統一處理。
+- **切換步驟**：
+  1. 將 LPT（低優先權任務）的所有暫存器與 PSW 儲存至其堆疊。
+  2. 將 `OSTCBCur->OSTCBStkPtr` 更新為當前 SP，儲存堆疊頂端指標。
+  3. 從 `OSTCBHighRdy->OSTCBStkPtr` 載入 HPT 的堆疊指標。
+  4. 從 HPT 堆疊還原所有暫存器與 PSW，繼續執行 HPT。
 
 ---
 
-uC/OS-II 的 ISR 必須遵循以下十步驟模板，以確保核心資料結構的一致性：
+## 中斷處理（Interrupt Handling）
+
+---
+
+### 十步驟 ISR 模板
+
+uC/OS-II 的 ISR 以組合語言撰寫，標準模板如下：
 
 ```asm
-; 步驟 1：儲存所有 CPU 暫存器
-PUSHALL
+YourISR:
+    ; (1) 儲存所有 CPU 暫存器至被中斷任務的堆疊
+    ;     （ISR 執行可能修改暫存器，必須先保存）
+    Save all CPU registers;
 
-; 步驟 2：呼叫 OSIntEnter()，遞增 OSIntNesting
-CALL OSIntEnter
+    ; (2) 遞增中斷巢狀計數器 OSIntNesting
+    Call OSIntEnter();
 
-; 步驟 3：若 OSIntNesting == 1（最外層中斷），儲存 SP 至 OSTCBCur->OSTCBStkPtr
-;         巢狀中斷不儲存（每個任務只有一個 TCB，只需最初的堆疊指標）
-CMP OSIntNesting, 1
-JNE skip_sp_save
-MOV [OSTCBCur->OSTCBStkPtr], SP
-skip_sp_save:
+    ; (3) 若為第一層中斷（非巢狀），立即儲存當前 SP 至 TCB
+    ;     （情境切換可能發生，需紀錄此時的 SP）
+    if (OSIntNesting == 1)
+        OSTCBCur->OSTCBStkPtr = SP;
 
-; 步驟 4–8：使用者 ISR 程式碼（讀取裝置、發布事件等）
-CALL UserISRCode
+    ; (4) 清除中斷裝置的中斷旗標
+    Clear the interrupting device;
 
-; 步驟 9：呼叫 OSIntExit()，遞減 OSIntNesting；若歸零且有更高優先權任務就緒，
-;         改為呼叫 OSIntCtxSw() 觸發任務切換
-CALL OSIntExit
+    ; (5) 重新啟用中斷（可選，允許更高優先權的巢狀中斷）
+    Re-enable interrupts (optional);
 
-; 步驟 10：還原所有 CPU 暫存器，執行 IRET
-POPALL
-IRET
+    ; (6) 執行使用者 ISR 程式碼（處理事件、發布旗號/訊息等）
+    Execute user ISR code to service the interrupt;
+
+    ; (7) 呼叫 OSIntExit()，評估是否需要情境切換
+    Call OSIntExit();
+
+    ; (8) 若 OSIntExit() 執行了情境切換，返回此點時多個高優先任務可能已執行完畢
+    ; (9) 還原所有 CPU 暫存器
+    Restore all CPU registers;
+
+    ; (10) 執行 IRET，返回被中斷的任務或 HPT
+    Execute a return from interrupt (IRET);
 ```
 
-### `OSIntEnter()` / `OSIntExit()` 原始碼解析
+- **步驟 (1) 和 (7)** 是 uC/OS-II 要求的額外步驟，用於支援可能發生的情境切換。
+- **步驟 (3) 的關鍵**：只有在第一層中斷（`OSIntNesting == 1`）時才儲存 SP，因為巢狀中斷使用同一個任務堆疊，只需記錄第一層進入時的 SP 作為情境切換基準。
+
+### `OSIntEnter()` / `OSIntExit()` 原始碼
 
 ```c
-void OSIntEnter(void)
+void OSIntEnter (void)
 {
     OS_ENTER_CRITICAL();
-    OSIntNesting++;          /* 遞增巢狀計數器 */
+    OSIntNesting++;         /* 遞增巢狀計數器 */
     OS_EXIT_CRITICAL();
 }
 
-void OSIntExit(void)
+void OSIntExit (void)
 {
     OS_ENTER_CRITICAL();
-    if (--OSIntNesting == 0) {                          /* 最外層 ISR 結束 */
-        if (OSLockNesting == 0) {                       /* 排程未鎖定 */
-            INT8U y = OSUnMapTbl[OSRdyGrp];
-            OSPrioHighRdy = (INT8U)((y << 3) +
-                            OSUnMapTbl[OSRdyTbl[y]]);
-            if (OSPrioHighRdy != OSPrioCur) {           /* 有更高優先權任務 */
-                OSTCBHighRdy = OSTCBPrioTbl[OSPrioHighRdy];
-                OSCtxSwCtr++;
-                OSIntCtxSw();                           /* ISR 層級情境切換 */
-            }
+    /* 僅在最外層 ISR 結束（OSIntNesting 歸零）且排程器未鎖定時執行排程 */
+    if ((--OSIntNesting | OSLockNesting) == 0) {
+        /* 找出 HPT */
+        OSIntExitY    = OSUnMapTbl[OSRdyGrp];
+        OSPrioHighRdy = (INT8U)((OSIntExitY << 3) +
+                         OSUnMapTbl[OSRdyTbl[OSIntExitY]]);
+        /* 若 HPT 不是當前任務，執行 ISR 層級情境切換 */
+        if (OSPrioHighRdy != OSPrioCur) {
+            OSTCBHighRdy = OSTCBPrioTbl[OSPrioHighRdy];
+            OSCtxSwCtr++;
+            OSIntCtxSw();   /* 注意：使用 OSIntCtxSw()，非 OS_TASK_SW() */
         }
     }
     OS_EXIT_CRITICAL();
 }
 ```
 
-### `OSIntCtxSw()` vs `OS_TASK_SW()`
+### ISR 層級 vs. 任務層級情境切換
 
-- **`OS_TASK_SW()`**：觸發軟體中斷，CPU 完整儲存暫存器後再進行切換；用於任務層級（正常執行流中）。
-- **`OSIntCtxSw()`**：ISR 已儲存暫存器，跳過儲存步驟直接切換至高優先權任務的堆疊；用於 ISR 層級，避免雙重儲存。
-
-## `OSTimeTick()` 實作
+| 比較項目 | 任務層級（Task-Level） | ISR 層級（ISR-Level） |
+|------|------|------|
+| **觸發函式** | `OS_TASK_SW()` | `OSIntCtxSw()` |
+| **觸發機制** | 軟體中斷 `INT 80h` | 直接在 `OSIntExit()` 內呼叫 |
+| **原因** | 任務主動讓出 CPU，無硬體中斷 | ISR 結束時排程器發現更高優先權任務 |
+| **本質** | 模擬 ISR 進行情境切換 | 真實 ISR 內直接切換 |
 
 ---
 
-`OSTimeTick()` 在每個時鐘節拍中斷的 ISR 中被呼叫，負責更新所有任務的延遲計數器。
+## 時鐘節拍（Clock Tick）
 
-### 線性掃描 O(n) 實作
+---
+
+時鐘節拍 ISR 必須在 `OSStart()` 啟動排程後才能安裝，通常在啟動任務（startup task）中設定。時鐘節拍 ISR 遵循標準 ISR 模板，並在步驟 (6) 呼叫 `OSTimeTick()`。
+
+### `OSTimeTick()` 原始碼
 
 ```c
-void OSTimeTick(void)
+void OSTimeTick (void)
 {
-    OS_TCB *ptcb = OSTCBList;    /* 從已建立 TCB 鏈的頭部開始 */
-    while (ptcb->OSTCBPrio != OS_IDLE_PRIO) {
-        OS_ENTER_CRITICAL();
-        if (ptcb->OSTCBDly != 0) {          /* 有延遲計數 */
-            if (--ptcb->OSTCBDly == 0) {    /* 計數歸零 */
-                if (!(ptcb->OSTCBStat & OS_STAT_SUSPEND)) {
-                    /* 不是 Suspend 狀態，移回就緒列表 */
-                    OSRdyGrp           |= ptcb->OSTCBBitY;
-                    OSRdyTbl[ptcb->OSTCBY] |= ptcb->OSTCBBitX;
-                } else {
-                    ptcb->OSTCBDly = 1;     /* Suspend 任務，恢復計數為 1 */
+    OS_TCB *ptcb;
+
+    OSTimeTickHook();           /* 使用者可自訂的 hook 函式 */
+
+    if (OSRunning == TRUE) {
+        ptcb = OSTCBList;
+        /* 線性掃描所有 TCB，直到閒置任務為止 */
+        while (ptcb->OSTCBPrio != OS_IDLE_PRIO) {
+            OS_ENTER_CRITICAL();
+            if (ptcb->OSTCBDly != 0) {
+                /* 遞減延遲計數器 */
+                if (--ptcb->OSTCBDly == 0) {
+                    /* 計數到零且未被懸掛（suspend），將任務移至就緒列表 */
+                    if ((ptcb->OSTCBStat & OS_STAT_SUSPEND) == OS_STAT_RDY) {
+                        OSRdyGrp               |= ptcb->OSTCBBitY;
+                        OSRdyTbl[ptcb->OSTCBY] |= ptcb->OSTCBBitX;
+                    } else {
+                        ptcb->OSTCBDly = 1; /* 仍被懸掛，保持延遲為 1 */
+                    }
                 }
             }
+            ptcb = ptcb->OSTCBNext;
+            OS_EXIT_CRITICAL();
         }
-        OS_EXIT_CRITICAL();
-        ptcb = ptcb->OSTCBNext;
     }
 }
 ```
 
-- **複雜度**：O(n)，n 為系統中所有已建立的任務數量；任務數多時，時鐘節拍 ISR 開銷線性增長。
+### O(n) 線性掃描 vs. Delta List
 
-### Delta List 改良（概念）
+`OSTimeTick()` 採用線性掃描所有 TCB 的設計，複雜度為 O(n)。
 
-- **問題**：O(n) 掃描在任務數量大時效率低下，時鐘節拍 ISR 執行時間不穩定。
-- **Delta List**：將等待任務按剩餘延遲時間排序，每個節點只儲存與前一個節點的差值（delta）；`OSTimeTick()` 只需更新串列頭，達到 O(1) 更新、O(1) 到期任務識別。
-- **uC/OS-II 原生實作**：未內建 Delta List，屬於進階改良方向；若任務數量少（嵌入式系統常見），O(n) 掃描足夠。
-
-## 排程鎖定（`OSSchedLock()` / `OSSchedUnlock()`）
+| 比較項目 | 線性掃描（uC/OS-II 採用） | Delta List（替代方案） |
+|------|------|------|
+| **時間前進 1 tick** | O(n)（掃描所有 TCB） | O(1)（只更新 delta list 頭部） |
+| **插入新的睡眠任務** | O(1)（只設定 `OSTCBDly`） | O(n)（需在有序 delta list 中找插入位置） |
+| **實作複雜度** | 低 | 高 |
+| **適用場景** | 任務數量少的嵌入式系統 | 任務數量多、tick 頻率高的系統 |
 
 ---
 
-**排程鎖定**允許任務暫時禁止排程器切換任務，但不關閉中斷（ISR 仍可執行）。
+## 排程器鎖定（Scheduler Lock）
+
+---
+
+### `OSSchedLock()` / `OSSchedUnlock()` 原始碼
 
 ```c
-void OSSchedLock(void)
+void OSSchedLock (void)
 {
-    if (OSRunning) {
-        OS_ENTER_CRITICAL();
-        OSLockNesting++;     /* 遞增鎖定計數器 */
-        OS_EXIT_CRITICAL();
+    OS_ENTER_CRITICAL();
+    if (OSRunning == TRUE) {
+        OSLockNesting++;    /* 遞增鎖定計數器，允許巢狀呼叫 */
     }
+    OS_EXIT_CRITICAL();
 }
 
-void OSSchedUnlock(void)
+void OSSchedUnlock (void)
 {
-    if (OSRunning) {
-        OS_ENTER_CRITICAL();
-        if (OSLockNesting > 0) {
-            if (--OSLockNesting == 0) {  /* 計數歸零才真正解鎖 */
-                OS_EXIT_CRITICAL();
-                OS_Sched();              /* 立即觸發一次排程評估 */
-                return;
-            }
+    OS_ENTER_CRITICAL();
+    if (OSRunning == TRUE) {
+        OSLockNesting--;
+        if (OSLockNesting == 0) {
+            OS_EXIT_CRITICAL();
+            OS_Sched();     /* 計數歸零時立即執行一次排程評估 */
+        } else {
+            OS_EXIT_CRITICAL();
         }
+    } else {
         OS_EXIT_CRITICAL();
     }
 }
 ```
 
-- **使用場景**：存取需要多步驟修改的非原子資料結構，但不希望關閉中斷（例如更新顯示緩衝區，允許 UART ISR 繼續執行）。
-- **與關閉中斷的區別**：排程鎖定期間 ISR 仍可執行，中斷延遲不受影響；關閉中斷則完全阻止 ISR 執行，應盡量縮短持鎖時間。
-- **三種競態避免機制總結**：
+- **`OSLockNesting` 計數器**：允許巢狀呼叫 `OSSchedLock()`；必須對應相同次數的 `OSSchedUnlock()` 才能解鎖。
+- **中斷仍有效**：鎖定排程器只阻止任務切換，中斷仍可被接收與處理。
+- **禁止事項**：鎖定後不可呼叫任何可能導致情境切換的 API（如 `OSSemPend()`、`OSTimeDly()` 等），否則系統可能死鎖。
 
-| 機制 | 阻止對象 | 適用情境 |
-|------|---------|---------|
-| 關閉中斷（`OS_ENTER_CRITICAL`） | 所有中斷 + 排程器 | 核心資料結構的原子操作 |
-| 排程鎖定（`OSSchedLock`） | 排程器（ISR 仍執行） | 需要原子操作但不能關中斷的場景 |
-| 旗號/互斥鎖（Semaphore/Mutex） | 其他任務（ISR 視情況） | 應用層的資源保護 |
+### 三種競爭條件防護機制對比
 
-## 閒置任務（`OS_TaskIdle`）
+| 機制 | 禁止中斷 | 禁止任務搶占 | 影響範圍 | 典型使用場景 |
+|------|------|------|------|------|
+| **`OS_ENTER/EXIT_CRITICAL`** | 是 | 是 | 全系統 | 核心程式碼短臨界區 |
+| **`OSSchedLock/Unlock`** | 否 | 是 | 所有任務 | 需要中斷回應的較長臨界區 |
+| **`OSSemPend/Post`** | 否 | 否 | 只影響 pending/posting 任務 | 使用者程式碼中的共享資源保護 |
+
+### 中斷處理 Do's and Don'ts
+
+**應做（Do's）**：
+
+- **ISR 盡可能短**：ISR 只做最小工作，複雜工作延遲至工作任務（worker task）。
+- **長工作交給工作任務**：ISR 透過旗號或訊息通知工作任務處理後續。
+
+**不可做（Don'ts）**：
+
+- **不可在中斷關閉時呼叫系統服務**：可能造成系統掛起或競爭條件。
+- **不可在排程器鎖定時呼叫系統服務**：可能造成死鎖。
+- **不可在 ISR 中呼叫 blocking API**：會造成死鎖或非預期延遲。
 
 ---
 
-**閒置任務（Idle Task）**由 `OSInit()` 自動建立，優先權固定為 63（最低），在系統無其他就緒任務時獨佔 CPU。
+## 閒置任務（Idle Task）
+
+---
+
+**閒置任務（Idle Task）**是 uC/OS-II 自動建立的最低優先權任務（priority 63），永遠不可被刪除或懸掛。
 
 ```c
-void OS_TaskIdle(void *pdata)
+void OS_TaskIdle (void *pdata)
 {
-    pdata = pdata;    /* 防止編譯器警告（unused parameter） */
+    pdata = pdata;  /* 防止編譯器 warning */
     for (;;) {
         OS_ENTER_CRITICAL();
-        OSIdleCtr++;  /* 遞增閒置計數器，供 CPU 使用率計算 */
+        OSIdleCtr++;        /* 遞增閒置計數器，供 CPU 使用率計算用 */
         OS_EXIT_CRITICAL();
-        OSTaskIdleHook();  /* 可由使用者定義的 Hook（如進入省電模式） */
+        OSTaskIdleHook();   /* 使用者可自訂的 hook（注意：不可呼叫 delay 或 suspend） */
     }
 }
 ```
 
-- **`OSIdleCtr` 的用途**：統計任務（Stat Task，優先權 62）定期讀取 `OSIdleCtr`，與全滿負載的基準值比較，計算 CPU 使用率百分比。
-- **必要性**：確保在任何情況下都有任務可執行，避免排程器無任務可選的邊界情況。
+- **永遠就緒**：當所有其他任務均不在 Ready 狀態時，閒置任務執行，確保 CPU 永遠有任務可跑。
+- **`OSIdleCtr`**：閒置計數器由統計任務（Stat Task, priority 62）讀取，計算 CPU 使用率。
+- **Hook 限制**：`OSTaskIdleHook()` 中絕對不可呼叫 `OSTimeDly()`、`OSTaskSuspend()` 等 blocking API，否則閒置任務永遠無法恢復執行。
 
-## 啟動序列（`OSInit()` → `OSStart()` → `OSStartHighRdy()`）
+---
+
+## 啟動序列（Startup Sequence）
 
 ---
 
 uC/OS-II 的啟動分三個階段：
 
-### 階段 1：`OSInit()`（核心初始化）
+- **`OSInit()`**：初始化所有核心資料結構（TCB 自由列表、就緒列表、事件控制區塊等），並自動建立閒置任務（`OS_TaskIdle`，priority 63）。
+- **建立至少一個應用任務**：在呼叫 `OSStart()` 前，必須以 `OSTaskCreate()` 或 `OSTaskCreateExt()` 建立至少一個任務。
+- **`OSStart()`**：找出就緒列表中最高優先權任務，載入其 TCB 的堆疊指標，模擬從中斷返回（`IRET`）開始執行；`OSStart()` 永遠不會返回給 `main()`。
 
 ```c
-void OSInit(void)
+void main (void)
 {
-    /* 初始化所有核心資料結構 */
-    OS_InitMisc();      /* 全域變數清零 */
-    OS_InitRdyList();   /* 就緒列表清零 */
-    OS_InitTCBList();   /* TCB free list 建立 */
-    OS_InitEventList(); /* ECB free list 建立 */
-
-    /* 建立閒置任務（優先權 63） */
-    OSTaskCreate(OS_TaskIdle, (void *)0,
-                 &OSTaskIdleStk[OS_IDLE_STK_SIZE-1], OS_IDLE_PRIO);
-
-    /* 若啟用統計任務，建立統計任務（優先權 62） */
-    #if OS_TASK_STAT_EN
-    OSTaskCreate(OS_TaskStat, ...);
-    #endif
+    OSInit();                          /* 初始化核心資料結構 */
+    OSTaskCreate(StartTask, ...);      /* 建立至少一個任務 */
+    OSStart();  /* 啟動多工，此行之後的程式碼永遠不會執行 */
 }
-```
 
-### 階段 2：`OSStart()`（啟動排程）
-
-```c
-void OSStart(void)
+void OSStart (void)
 {
-    if (!OSRunning) {
-        INT8U y = OSUnMapTbl[OSRdyGrp];
-        OSPrioHighRdy = (INT8U)((y << 3) +
-                        OSUnMapTbl[OSRdyTbl[y]]);  /* 找最高優先權就緒任務 */
-        OSPrioCur    = OSPrioHighRdy;
-        OSTCBHighRdy = OSTCBPrioTbl[OSPrioHighRdy];
-        OSTCBCur     = OSTCBHighRdy;
-        OSStartHighRdy();   /* 永不返回 */
+    if (OSRunning == FALSE) {
+        /* 找出就緒列表中最高優先權任務 */
+        y             = OSUnMapTbl[OSRdyGrp];
+        OSPrioHighRdy = (INT8U)((y << 3) + OSUnMapTbl[OSRdyTbl[y]]);
+        OSTCBHighRdy  = OSTCBPrioTbl[OSPrioHighRdy];
+        OSTCBCur      = OSTCBHighRdy;
+        /* 呼叫 OSStartHighRdy()（組合語言），以 IRET 啟動第一個任務 */
+        OSStartHighRdy();
     }
 }
 ```
 
-- **在 `OSInit()` 之後、`OSStart()` 之前**：使用者可呼叫 `OSTaskCreate()` 建立初始任務，但不可啟動時鐘節拍中斷。
+**設計細節**：新建立的任務堆疊被 `OSTaskStkInit()` 初始化成「剛剛被中斷」的狀態（暫存器預設值壓入堆疊），所以 `OSStart()` 可以用 `IRET` 指令「返回」到任務入口，與普通情境切換使用完全相同的程式路徑。
 
-### 階段 3：`OSStartHighRdy()`（處理器相關，Port 層實作）
+---
 
-```asm
-OSStartHighRdy:
-    MOV  [OSRunning], 1          ; 設定 OSRunning = TRUE
-    ; 載入 OSTCBHighRdy->OSTCBStkPtr 至 SP
-    MOV  SP, [OSTCBHighRdy->OSTCBStkPtr]
-    POPALL                        ; 還原所有暫存器（模擬從堆疊恢復）
-    IRET                          ; 跳至第一個任務的入口點
-```
-
-- **設計巧妙之處**：`OSTaskCreate()` 在建立任務時，`OSTaskStkInit()` 會在堆疊上預置一組「假情境」（fake context），使得 `OSStartHighRdy()` 的 `POPALL + IRET` 可以正確跳至任務函式的入口，彷彿從一次中斷返回。
-
-**備註：本筆記整理 uC/OS-II Part 3 的核心實作，核心貢獻在於系統化呈現從 TCB free list、O(1) 點陣圖就緒列表、OS_Sched() 排程器、任務層級與 ISR 層級情境切換，到十步驟 ISR 模板與三段式啟動序列的完整實作邏輯，是理解 uC/OS-II 可移植性設計與底層排程機制的關鍵參考。**
+**備註：本筆記整理 uC/OS-II Part 3 的核心結構實作，關鍵貢獻在於以臨界區三機制對比表、O(1) 就緒列表點陣圖操作（OSMapTbl / OSUnMapTbl）、OS_Sched() 與 OSIntExit() 原始碼解析、十步驟 ISR 模板，以及 OSTimeTick() 複雜度分析，完整呈現 uC/OS-II 核心的設計理念與實作細節。**
