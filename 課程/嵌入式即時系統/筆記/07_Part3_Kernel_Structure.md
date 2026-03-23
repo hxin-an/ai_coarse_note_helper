@@ -4,9 +4,13 @@
 
 ## 前言
 
+---
+
 本份筆記整理 uC/OS-II Part 3 的核心實作細節，從檔案架構、臨界區機制、任務建立與管理，深入到 TCB 資料結構、O(1) 就緒列表、排程器實作、情境切換機制、ISR 十步驟模板、時鐘節拍掃描、排程鎖定，以及啟動序列。相較於 Part 2 的系統概念，Part 3 直接呈現原始碼層面的實作邏輯，是理解 uC/OS-II 可移植性設計與各平台 port 的關鍵材料。
 
 ## 大綱
+
+---
 
 - uC/OS-II 檔案架構（五層模型）
 - 臨界區（Critical Section）
@@ -40,8 +44,6 @@
 - 閒置任務（`OS_TaskIdle`）
 - 啟動序列（`OSInit()` → `OSStart()` → `OSStartHighRdy()`）
 
----
-
 ## uC/OS-II 檔案架構（五層模型）
 
 ---
@@ -58,8 +60,6 @@ uC/OS-II 以嚴格的分層架構實現跨平台可移植性，共分五層：
 
 - **可移植性設計**：移植到新平台只需重新撰寫 Port 層，核心程式碼完全不動。
 - **`OS_CFG.H` 的作用**：在編譯期裁剪核心體積，不需要的功能（如記憶體管理、訊息佇列）可直接關閉，減少 ROM/RAM 佔用。
-
----
 
 ## 臨界區（Critical Section）
 
@@ -85,8 +85,6 @@ uC/OS-II 提供三種 `OS_CRITICAL_METHOD`，x86 port 使用 **Method 2**：
 
 - **Method 1 的問題**：直接 `CLI`（關）/ `STI`（開），若呼叫 `OS_EXIT_CRITICAL()` 前原本中斷已是關閉狀態，`STI` 會錯誤地開啟中斷，破壞外層臨界區。
 - **Method 2 的優點**：`PUSHF` 儲存當前中斷旗標，`POPF` 還原而非強制開啟，可正確處理巢狀臨界區（outer critical section 不受 inner critical section 的 `POPF` 影響）。
-
----
 
 ## 任務結構與管理
 
@@ -130,8 +128,6 @@ uC/OS-II 以 `OSTCBStat` 欄位記錄任務狀態，各狀態的內部意義：
 - **Running（執行中）**：`OSTCBCur` 指向此任務，當前佔用 CPU；邏輯上等同於處於 Ready 狀態但已被選中執行。
 - **Waiting（等待中）**：`OSTCBDly > 0`（計時等待）或 `OSTCBStat != 0`（等待事件）；任務從就緒列表移除，`OSTimeTick()` 或事件發布時才移回。
 - **ISR Running（中斷執行中）**：CPU 正執行 ISR；`OSIntNesting > 0`；被中斷任務的情境儲存在其堆疊中，等待 ISR 結束後恢復。
-
----
 
 ## 任務控制區塊（`OS_TCB`）
 
@@ -217,8 +213,6 @@ INT8U OS_TCBInit(INT8U prio, OS_STK *ptos, OS_STK *pbos,
 
 - **關鍵設計**：先縮短第一個臨界區（只取 TCB），再以第二個臨界區修改共用結構；避免持鎖時間過長影響中斷延遲。
 
----
-
 ## 就緒列表（Ready List）
 
 ---
@@ -266,8 +260,6 @@ OSPrioHighRdy = (y << 3) + x;             /* 合成優先權數值 */
 - **`OSMapTbl[8]`**：將索引 0–7 對應至對應的 bit 遮罩（`{0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80}`）。
 - **`OSUnMapTbl[256]`**：256 元素的查找表，輸入一個 8-bit 值，輸出其最低有效位（LSB）的位置（0–7）；這等同於 O(1) 的 find-lowest-set-bit 操作，避免逐 bit 掃描。
 
----
-
 ## 排程器（`OS_Sched()`）
 
 ---
@@ -311,8 +303,6 @@ void OS_Sched(void)
 - **機制**：觸發軟體中斷 80h，CPU 跳至對應的中斷服務常式執行情境切換。
 - **設計原因**：透過軟體中斷統一情境切換的入口，使任務層級切換（`OS_TASK_SW()`）與 ISR 層級切換（`OSIntCtxSw()`）共用相同的暫存器儲存/還原框架，但起點不同。
 
----
-
 ## 情境切換機制
 
 ---
@@ -333,8 +323,6 @@ void OS_Sched(void)
 5. **載入 HPT（高優先權任務）的 `OSTCBStkPtr`**：從 HPT 的 TCB 取出堆疊指標，設定 SP。
 6. **還原 HPT 情境**：從 HPT 的堆疊彈出所有暫存器。
 7. **`IRET`**：CPU 跳至 HPT 上次被中斷的位置繼續執行。
-
----
 
 ## ISR 處理（十步驟模板）
 
@@ -402,8 +390,6 @@ void OSIntExit(void)
 - **`OS_TASK_SW()`**：觸發軟體中斷，CPU 完整儲存暫存器後再進行切換；用於任務層級（正常執行流中）。
 - **`OSIntCtxSw()`**：ISR 已儲存暫存器，跳過儲存步驟直接切換至高優先權任務的堆疊；用於 ISR 層級，避免雙重儲存。
 
----
-
 ## `OSTimeTick()` 實作
 
 ---
@@ -442,8 +428,6 @@ void OSTimeTick(void)
 - **問題**：O(n) 掃描在任務數量大時效率低下，時鐘節拍 ISR 執行時間不穩定。
 - **Delta List**：將等待任務按剩餘延遲時間排序，每個節點只儲存與前一個節點的差值（delta）；`OSTimeTick()` 只需更新串列頭，達到 O(1) 更新、O(1) 到期任務識別。
 - **uC/OS-II 原生實作**：未內建 Delta List，屬於進階改良方向；若任務數量少（嵌入式系統常見），O(n) 掃描足夠。
-
----
 
 ## 排程鎖定（`OSSchedLock()` / `OSSchedUnlock()`）
 
@@ -487,8 +471,6 @@ void OSSchedUnlock(void)
 | 排程鎖定（`OSSchedLock`） | 排程器（ISR 仍執行） | 需要原子操作但不能關中斷的場景 |
 | 旗號/互斥鎖（Semaphore/Mutex） | 其他任務（ISR 視情況） | 應用層的資源保護 |
 
----
-
 ## 閒置任務（`OS_TaskIdle`）
 
 ---
@@ -510,8 +492,6 @@ void OS_TaskIdle(void *pdata)
 
 - **`OSIdleCtr` 的用途**：統計任務（Stat Task，優先權 62）定期讀取 `OSIdleCtr`，與全滿負載的基準值比較，計算 CPU 使用率百分比。
 - **必要性**：確保在任何情況下都有任務可執行，避免排程器無任務可選的邊界情況。
-
----
 
 ## 啟動序列（`OSInit()` → `OSStart()` → `OSStartHighRdy()`）
 
@@ -572,7 +552,5 @@ OSStartHighRdy:
 ```
 
 - **設計巧妙之處**：`OSTaskCreate()` 在建立任務時，`OSTaskStkInit()` 會在堆疊上預置一組「假情境」（fake context），使得 `OSStartHighRdy()` 的 `POPALL + IRET` 可以正確跳至任務函式的入口，彷彿從一次中斷返回。
-
----
 
 **備註：本筆記整理 uC/OS-II Part 3 的核心實作，核心貢獻在於系統化呈現從 TCB free list、O(1) 點陣圖就緒列表、OS_Sched() 排程器、任務層級與 ISR 層級情境切換，到十步驟 ISR 模板與三段式啟動序列的完整實作邏輯，是理解 uC/OS-II 可移植性設計與底層排程機制的關鍵參考。**
